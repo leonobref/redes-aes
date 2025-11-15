@@ -18,7 +18,7 @@ private_key, public_key = cripto.RSA_keys_generate()
 
 public_keys = {}
 group_keys = {} 
-groups = {}        
+groups = {}       
 
 def recvall(sock, n):
     data = b''
@@ -46,19 +46,41 @@ def receber():
                     key = base64.b64decode(payload['key'])
                     public_keys[payload['dest']] = key
                     if DEBUG:
-                        print(f"[CLIENT] Chave pública recebida: {payload['dest']} -> {key}")
+                        print(f"\n[DEBUG] Chave pública recebida: {payload['dest']} -> {key}\n")
 
                 elif cmd == '/send':
+                    sig = payload.get('signature')
+                    if sig is None:
+                        continue
+
+                    sig = base64.b64decode(sig)
+
+                    if DEBUG:
+                        print(f"\n[DEBUG] Assinatura: {sig}")
+                    
+                    pld_to_verify = dict(payload)
+                    del pld_to_verify['signature']
+                    to_verify = json.dumps(pld_to_verify, sort_keys=True).encode(encoding)
+                    sender_pub = public_keys.get(pld_to_verify.get('sender'))
+
+                    if not sender_pub or not cripto.RSA_verify(to_verify, sig, sender_pub):
+                        continue
+
                     iv = base64.b64decode(payload['iv'])
+                    tag = base64.b64decode(payload['tag'])
                     aes_key_encrypted = base64.b64decode(payload['aes_key_encrypted'])
                     cipherText = base64.b64decode(payload['ciphertext'])
                     aes_key = cripto.RSA_decrypt(aes_key_encrypted, private_key)
-                    mensagem = cripto.AES_decrypt(cipherText, aes_key, iv)
+                    mensagem = cripto.AES_decrypt(cipherText, aes_key, iv, tag)
+
+                    if not mensagem:
+                        continue
 
                     if DEBUG:
+                        print(f"\n[DEBUG] tag: {tag}")
                         print(f"\n[DEBUG] Texto cifrado recebido: {cipherText}")
-                        print(f"[DEBUG] Chave AES encriptada: {aes_key_encrypted}\n")
-                        print(f"[DEBUG] Chave AES: {aes_key}")
+                        print(f"\n[DEBUG] Chave AES encriptada: {aes_key_encrypted}")
+                        print(f"\n[DEBUG] Chave AES: {aes_key}\n")
 
                     print(mensagem)
 
@@ -76,7 +98,7 @@ def receber():
 
                         if DEBUG:
                             print(f"\n[DEBUG] Chave de grupo encriptada: {enc_key}")
-                            print(f"[DEBUG] Chave de grupo recebida: {aes_key}\n")
+                            print(f"\n[DEBUG] Chave de grupo recebida: {aes_key}\n")
                     
                         print(f"[CLIENT] Membros atuais: {', '.join(map(str, members))}")
 
@@ -87,15 +109,21 @@ def receber():
                 elif cmd == '/gsend':
                     group_name = payload.get('group')
                     iv = base64.b64decode(payload['iv'])
+                    tag = base64.b64decode(payload['tag'])
                     cipherText = base64.b64decode(payload['ciphertext'])
                     aes_key = group_keys.get(group_name)
                     if not aes_key:
                         print(f"\nVocê não tem a chave para o grupo {group_name}.")
                         continue
 
+                    mensagem = cripto.AES_decrypt(cipherText, aes_key, iv, tag)
+                    if not mensagem:
+                        continue
+
                     if DEBUG:
+                        print(f"\n[DEBUG] tag: {tag}")
                         print(f"\n[DEBUG] Texto do grupo [{group_name}] encriptado recebido:\n{cipherText}\n")
-                    mensagem = cripto.AES_decrypt(cipherText, aes_key, iv)
+ 
                     print(mensagem)
 
                 elif cmd == 'need_rotate':
@@ -110,13 +138,22 @@ def receber():
                     if missing:
                         print(f"Faltam chaves públicas: {missing}")
                         continue
+
                     new_aes = cripto.AES_key_generate()
                     enc_keys = {}
+
                     for m in members:
                         enc = cripto.RSA_encrypt(new_aes, public_keys[m])
                         enc_keys[m] = base64.b64encode(enc).decode(encoding)
+
                     group_keys[group] = new_aes
-                    payload = {'cmd':'/rotategroup','group':group,'actor':nickname,'enc_keys':enc_keys}
+                    payload = {
+                        'cmd':'/rotategroup',
+                        'group':group,
+                        'actor':nickname,
+                        'enc_keys':enc_keys
+                        }
+                    
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
                     print(f"[CLIENT] Pedido de rotação de chave para {group} enviado.")
@@ -137,13 +174,32 @@ def receber():
                     print(f"[CLIENT] Payload desconhecido: {payload}")
 
             else:
+
+                # Receber challenge
+                tam_challenge = int.from_bytes(recvall(client, 4))
+                challenge = recvall(client, tam_challenge)
+
+                # Criar assinatura com a chave RSA privada 
+                signature = cripto.RSA_sign(challenge, private_key)
+
+                if DEBUG:
+                    print(f"\n[DEBUG] Assinatura: {signature}\n")
+
+                # Enviar chave RSA pública
+                client.send(len(public_key).to_bytes(4))
+                client.send(public_key)
+
+                # Enviar assinatura
+                client.send(len(signature).to_bytes(4))
+                client.send(signature)
+
+                # Enviar nickname
+                encode_nick = nickname.encode(encoding)
+                client.send(len(encode_nick).to_bytes(4))
+                client.send(encode_nick)
+
                 mensagem = client.recv(1024).decode(encoding)
                 if mensagem == 'NICK':
-                    encode_nick = nickname.encode(encoding)
-                    client.send(len(encode_nick).to_bytes(4))
-                    client.send(encode_nick)
-                    client.send(len(public_key).to_bytes(4))
-                    client.send(public_key)
                     LOGIN = True
                     public_keys[nickname] = public_key
                     print("\nComandos:")
@@ -157,6 +213,8 @@ def receber():
                     print("/rotategroup <group>\n")
                 else:
                     print(mensagem)
+                    client.close()
+                    break
 
         except Exception as e:
             print(f"[CLIENT] Falha ao receber a mensagem: {e}")
@@ -175,7 +233,12 @@ def escrever():
                 if text.startswith('/add '):
                     split_text = text.split(' ', 1)
                     dest = split_text[1].strip()
-                    payload = {'cmd':'/add','dest':dest}
+                    
+                    payload = {
+                        'cmd':'/add',
+                        'dest':dest
+                        }
+                    
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
                     continue
@@ -199,18 +262,30 @@ def escrever():
                         continue
                     plaintext = split_text[2]
                     mensagem = f'{nickname}: {plaintext}'
-                    cipherText, aes_key, iv = cripto.AES_encrypt(mensagem)
+                    cipherText, aes_key, iv, tag = cripto.AES_encrypt(mensagem)
                     aes_key_encrypted = cripto.RSA_encrypt(aes_key, public_keys[dest])
 
-                    if DEBUG:
-                        print(f"\n[DEBUG] Texto cifrado enviado: {cipherText}")
-                        print(f"[DEBUG] Chave AES: {aes_key}")
-                        print(f"[DEBUG] Chave AES encriptada: {aes_key_encrypted}\n")
+                    payload = {
+                        'cmd':'/send',
+                        'sender': nickname,
+                        'dest':dest,
+                        'aes_key_encrypted': base64.b64encode(aes_key_encrypted).decode(encoding),
+                        'iv': base64.b64encode(iv).decode(encoding),
+                        'tag': base64.b64encode(tag).decode(encoding),
+                        'ciphertext': base64.b64encode(cipherText).decode(encoding)
+                    }
+                    
+                    to_sign = json.dumps(payload, sort_keys=True).encode(encoding)
+                    signature = cripto.RSA_sign(to_sign, private_key)
 
-                    payload = {'cmd':'/send','dest':dest,
-                               'aes_key_encrypted': base64.b64encode(aes_key_encrypted).decode(encoding),
-                               'iv': base64.b64encode(iv).decode(encoding),
-                               'ciphertext': base64.b64encode(cipherText).decode(encoding)}
+                    if DEBUG:
+                        print(f"\n[DEBUG] tag: {tag}")
+                        print(f"\n[DEBUG] Texto cifrado enviado: {cipherText}")
+                        print(f"\n[DEBUG] Chave AES: {aes_key}")
+                        print(f"\n[DEBUG] Chave AES encriptada: {aes_key_encrypted}")
+                        print(f"\n[DEBUG] Assinatura: {signature}\n")
+
+                    payload['signature'] = base64.b64encode(signature).decode(encoding)
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
                     continue
@@ -239,12 +314,18 @@ def escrever():
 
                     group_keys[group] = aes_key
                     groups[group] = members
+                    count_msg_groups[group] = 0
 
-                    payload = {'cmd':'/creategroup','group':group,'creator':nickname,'members':members,'enc_keys':enc_keys}
+                    payload = {
+                        'cmd':'/creategroup',
+                        'group':group,
+                        'creator':nickname,
+                        'members':members,
+                        'enc_keys':enc_keys}
 
                     if DEBUG:
                         print(f"\n[DEBUG] Chave de grupo enviada: {aes_key}")
-                        print(f"[DEBUG] Chave de grupo encriptada: {enc_keys}\n")
+                        print(f"\n[DEBUG] Chave de grupo encriptada: {enc_keys}\n")
 
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
@@ -256,16 +337,27 @@ def escrever():
                     if len(split_text) < 3:
                         print("Uso: /gsend <group> <msg>")
                         continue
+
                     group = split_text[1]
                     msg = split_text[2]
                     aes_key = group_keys.get(group)
+
                     if not aes_key:
                         print("Você não tem a chave do grupo. Peça ao owner.")
                         continue
+
                     mensagem = f"{nickname} [grupo:{group}]: {msg}"
-                    cipherText, _, iv = cripto.AES_encrypt(mensagem, key_override=aes_key)
-                    payload = {'cmd':'/gsend','group':group,'iv': base64.b64encode(iv).decode(encoding),
-                               'ciphertext': base64.b64encode(cipherText).decode(encoding),'sender':nickname}
+                    cipherText, _, iv, tag = cripto.AES_encrypt(mensagem, key_override=aes_key)
+
+                    payload = {
+                        'cmd':'/gsend',
+                        'sender':nickname,
+                        'group':group,
+                        'iv': base64.b64encode(iv).decode(encoding),
+                        'tag': base64.b64encode(tag).decode(encoding),
+                        'ciphertext': base64.b64encode(cipherText).decode(encoding)                        
+                        }
+                    
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
                     continue
@@ -283,18 +375,28 @@ def escrever():
                     new_members = list(groups[group])
                     if new_user not in new_members:
                         new_members.append(new_user)
+
                     missing = [m for m in new_members if m not in public_keys]
                     if missing:
                         print(f"Não estão adicionados:: {missing}")
                         continue
+
                     new_aes = cripto.AES_key_generate()
                     enc_keys = {}
                     for m in new_members:
                         enc = cripto.RSA_encrypt(new_aes, public_keys[m])
                         enc_keys[m] = base64.b64encode(enc).decode(encoding)
+
                     group_keys[group] = new_aes
                     groups[group] = new_members
-                    payload = {'cmd':'/addmember','group':group,'actor':nickname,'new_member':new_user,'enc_keys':enc_keys}
+
+                    payload = {
+                        'cmd':'/addmember',
+                        'group':group,
+                        'actor':nickname,
+                        'new_member':new_user,
+                        'enc_keys':enc_keys}
+                    
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
                     print(f"[CLIENT] Pedido de adicionar {new_user} a {group} enviado.")
@@ -305,23 +407,33 @@ def escrever():
                     if len(split_text) != 3:
                         print("Uso: /removemember <group> <user>")
                         continue
+
                     group = split_text[1]; rem_user = split_text[2].strip()
                     if group not in groups:
                         print("Grupo desconhecido localmente.")
                         continue
+
                     new_members = [m for m in groups[group] if m != rem_user]
                     missing = [m for m in new_members if m not in public_keys]
                     if missing:
                         print(f"Não estão adicionados: {missing}")
                         continue
+
                     new_aes = cripto.AES_key_generate()
                     enc_keys = {}
                     for m in new_members:
                         enc = cripto.RSA_encrypt(new_aes, public_keys[m])
                         enc_keys[m] = base64.b64encode(enc).decode(encoding)
+
                     group_keys[group] = new_aes
                     groups[group] = new_members
-                    payload = {'cmd':'/removemember','group':group,'actor':nickname,'remove':rem_user,'enc_keys':enc_keys}
+                    payload = {
+                        'cmd':'/removemember',
+                        'group':group,
+                        'actor':nickname,
+                        'remove':rem_user,
+                        'enc_keys':enc_keys}
+                    
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
                     print(f"[CLIENT] Pedido de remover {rem_user} de {group} enviado.")
@@ -332,10 +444,16 @@ def escrever():
                     if len(split_text) != 2:
                         print("Uso: /leavegroup <group>")
                         continue
+
                     group = split_text[1].strip()
-                    payload = {'cmd':'/leavegroup','group':group,'member':nickname}
+                    payload = {
+                        'cmd':'/leavegroup',
+                        'group':group,
+                        'member':nickname}
+                    
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
+
                     # local cleanup
                     if group in groups:
                         groups[group] = [m for m in groups[group] if m != nickname]
@@ -349,15 +467,18 @@ def escrever():
                     if len(split_text) != 2:
                         print("Uso: /rotategroup <group>")
                         continue
+
                     group = split_text[1].strip()
                     if group not in groups:
                         print("Grupo desconhecido localmente.")
                         continue
+
                     members = groups[group]
                     missing = [m for m in members if m not in public_keys]
                     if missing:
                         print(f"Não estão adicionados: {missing}")
                         continue
+
                     new_aes = cripto.AES_key_generate()
                     enc_keys = {}
                     for m in members:
@@ -369,8 +490,14 @@ def escrever():
                         print(f"[DEBUG] Antiga chave: {group_keys[group]}")
                         print(f"[DEBUG] Nova chave: {aes_key}")
                         print(f"[DEBUG] Nova chave encriptada: {enc_keys}\n")
+                    
                     group_keys[group] = new_aes
-                    payload = {'cmd':'/rotategroup','group':group,'actor':nickname,'enc_keys':enc_keys}
+                    payload = {
+                        'cmd':'/rotategroup',
+                        'group':group,
+                        'actor':nickname,
+                        'enc_keys':enc_keys}
+                    
                     pld = json.dumps(payload).encode(encoding)
                     client.send(len(pld).to_bytes(4)); client.send(pld)
                     print(f"[CLIENT] Pedido de rotação de chave para {group} enviado.")

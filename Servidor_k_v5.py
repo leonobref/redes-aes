@@ -1,8 +1,10 @@
 # Servidor.py
+import os
 import threading
 import socket
 import json
 import base64
+from cripto import RSA_verify
 
 host = 'localhost'
 port = 55555
@@ -334,22 +336,39 @@ def receive():
         client, address = server.accept()
         print(f"\nConectou com {str(address)}")
 
-        client.send('NICK'.encode(encoding))
+        challenge = os.urandom(32)
+        client.send(len(challenge).to_bytes(4))
+        client.send(challenge)
+
+        tam_rsa_public_key = int.from_bytes(recvall(client, 4))
+        rsa_public_key = recvall(client, tam_rsa_public_key)
+
+        tam_signature = int.from_bytes(recvall(client, 4))
+        signature = recvall(client, tam_signature)
 
         tam_nickname = int.from_bytes(recvall(client, 4))
         nickname = recvall(client, tam_nickname).decode(encoding)
         nicknames.append(nickname)
 
-        tam_rsa_public_key = int.from_bytes(recvall(client, 4))
-        rsa_public_key = recvall(client, tam_rsa_public_key)
+        if RSA_verify(challenge, signature, rsa_public_key):
+            if DEBUG:
+                print(f"\n[DEBUG] Chave autenticada para o cliente {nickname}")
+                print(f"[DEBUG] Assinatura: {signature}\n")
 
-        clients[nickname] = client
-        public_keys[nickname] = rsa_public_key
+            clients[nickname] = client
+            public_keys[nickname] = rsa_public_key
 
-        print(f"[SERVER] O apelido do cliente é {nickname}")
+            client.send('NICK'.encode(encoding))
 
-        thread = threading.Thread(target=handle, args=(client,))
-        thread.start()
+            print(f"[SERVER] O apelido do cliente é {nickname}")
+
+            thread = threading.Thread(target=handle, args=(client,))
+            thread.start()
+        
+        else:
+            client.send('ERR_SIGN'.encode(encoding))
+            client.close()
+            continue
 
 print(f"[SERVER] Servidor está online...")
 receive()
