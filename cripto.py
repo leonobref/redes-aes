@@ -1,5 +1,9 @@
 # cripto.py
 import os
+import json
+import base64
+import hashlib
+from Crypto.Random import get_random_bytes
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto.Signature import pkcs1_15
@@ -66,6 +70,60 @@ def RSA_verify(msg_bytes, signature_bytes, rsa_key_pub):
         return True
     except (ValueError, TypeError):
         return False
+
+
+# parâmetros PBKDF2
+PBKDF2_ITER = 200_000
+KDF_LEN = 32  # chave AES-256
+
+def encrypt_private_key_with_password(private_key_obj, password: str, iterations: int = PBKDF2_ITER):
+    """
+    Criptografa a chave privada (objeto RsaKey) com password -> retorna dict serializável (todos base64 strings)
+    """
+    if isinstance(password, str):
+        password = password.encode('utf-8')
+
+    # exporta chave privada em PEM (bytes)
+    priv_pem = private_key_obj.export_key(format='PEM')
+    salt = get_random_bytes(16)
+    key = hashlib.pbkdf2_hmac('sha256', password, salt, iterations, dklen=KDF_LEN)
+
+    cipher = AES.new(key, AES.MODE_GCM)
+    ciphertext, tag = cipher.encrypt_and_digest(priv_pem)
+    payload = {
+        'kdf': 'pbkdf2_sha256',
+        'iterations': iterations,
+        'salt': base64.b64encode(salt).decode('utf-8'),
+        'nonce': base64.b64encode(cipher.nonce).decode('utf-8'),
+        'tag': base64.b64encode(tag).decode('utf-8'),
+        'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
+    }
+    return payload
+
+def decrypt_private_key_with_password(encrypted_payload: dict, password: str):
+    """
+    encrypted_payload: dict com campos salt, nonce, tag, ciphertext, iterations
+    password: str
+    Retorna: objeto RSA (RsaKey) se OK, ou raise Exception se falha (senha errada ou corrupto)
+    """
+    if isinstance(password, str):
+        password = password.encode('utf-8')
+
+    iterations = int(encrypted_payload.get('iterations', PBKDF2_ITER))
+    salt = base64.b64decode(encrypted_payload['salt'])
+    nonce = base64.b64decode(encrypted_payload['nonce'])
+    tag = base64.b64decode(encrypted_payload['tag'])
+    ciphertext = base64.b64decode(encrypted_payload['ciphertext'])
+
+    key = hashlib.pbkdf2_hmac('sha256', password, salt, iterations, dklen=KDF_LEN)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    try:
+        priv_pem = cipher.decrypt_and_verify(ciphertext, tag)
+    except ValueError as e:
+        raise ValueError("Falha ao descriptografar. Senha incorreta ou dados corrompidos.") from e
+
+    # retorna objeto de chave privada
+    return RSA.import_key(priv_pem)
 
 
 # ---- AES helpers (AES-256-CBC por simplicidade) ----
