@@ -14,7 +14,7 @@ host = 'localhost'
 port = 55555
 
 encoding = 'utf-8'
-DEBUG = True
+DEBUG = False
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind((host, port))
@@ -55,7 +55,22 @@ def save_groups(gp):
 
 
 
-public_keys = load_users()  # map nickname -> public_key_pem (string or base64)
+users = load_users()  # formato esperado: { nickname: {"public_key": "...", "email": "..."} }
+
+public_keys = {}
+for nick, info in users.items():
+    # info pode ser string (versão antiga) ou dict (nova). Tratamos ambos.
+    if isinstance(info, dict):
+        pk = info.get("public_key")
+    else:
+        # compatibilidade com formato antigo onde users[nick] == public_key_str
+        pk = info
+
+    if isinstance(pk, str):
+        public_keys[nick] = pk.encode('utf-8')
+    else:
+        public_keys[nick] = pk  # já bytes # map nickname -> public_key_pem (string or base64)
+
 # converter strings para bytes se necessário quando usado (o seu código aceita bytes)
 for k,v in list(public_keys.items()):
     if isinstance(v, str):
@@ -84,7 +99,6 @@ def cleanup_client(nick):
 
     # 2. Remove estado temporário
     clients.pop(nick, None)
-    public_keys.pop(nick, None)
 
     if nick in nicknames:
         nicknames.remove(nick)
@@ -314,13 +328,27 @@ def handle(client):
             cmd = payload.get('cmd')
 
             if cmd == '/add':
-                # pedido de chave pública de outro usuario
                 dest = payload.get('dest')
+
+                key_bytes = None
                 if dest in public_keys:
+                    key_bytes = public_keys[dest]
+                else:
+                    # tenta recuperar da persistência (users.json)
+                    users_local = load_users()
+                    if dest in users_local:
+                        info = users_local[dest]
+                        pk_str = info['public_key'] if isinstance(info, dict) else info
+                        key_bytes = pk_str.encode('utf-8') if isinstance(pk_str, str) else pk_str
+
+                        # opcional: cacheia na memória para próximas requisições
+                        public_keys[dest] = key_bytes
+
+                if key_bytes:
                     if DEBUG:
                         print(f"\n[DEBUG] Requisção de chave pública de {dest}")
-                        print(f"[DEBUG] Chave pública: {public_keys[dest]}\n")
-                    payload_out = {'cmd':'/add','dest': dest, 'key': base64.b64encode(public_keys[dest]).decode(encoding)}
+                        print(f"[DEBUG] Chave pública: {key_bytes}\n")
+                    payload_out = {'cmd':'/add','dest': dest, 'key': base64.b64encode(key_bytes).decode(encoding)}
                 else:
                     payload_out = {'cmd':'/add'}  # indica inexistência
                 send_payload_to_socket(client, payload_out)
@@ -428,8 +456,14 @@ def receive():
         nicknames.append(nickname)
 
         tam_user_email = int.from_bytes(recvall(client, 4))
-        user_email = recvall(client, tam_user_email).decode(encoding)
-        user_emails.append(user_email)
+        user_email_client = recvall(client, tam_user_email).decode(encoding)
+
+        users = load_users()
+
+        if nickname in users:
+            user_email = users[nickname]["email"]
+        else:
+            user_email = user_email_client
 
         verification_code = str(random.randint(100000, 999999))
         
@@ -442,7 +476,6 @@ def receive():
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as email:
             email.login(server_email, password)
             email.send_message(msg)
-            print("chegueiaqui")
 
         tam_verification_code_client = int.from_bytes(recvall(client, 4))
         verification_code_client = recvall(client, tam_verification_code_client).decode(encoding)
@@ -458,9 +491,17 @@ def receive():
                 print(f"\n[DEBUG] Assinatura: {signature}\n")
 
             clients[nickname] = client
-            public_keys[nickname] = rsa_public_key
+            users = load_users()
 
-            save_users({k: (v.decode('utf-8') if isinstance(v, bytes) else v) for k,v in public_keys.items()})
+            users[nickname] = {
+                "public_key": rsa_public_key.decode('utf-8'),
+                "email": user_email
+            }
+
+            save_users(users)
+
+            # Atualiza public_keys em memória (bytes) para que /add funcione imediatamente
+            public_keys[nickname] = rsa_public_key if isinstance(rsa_public_key, bytes) else rsa_public_key.encode('utf-8')
 
             client.send('NICK'.encode(encoding))
 

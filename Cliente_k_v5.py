@@ -9,7 +9,7 @@ import cripto
 import persistence
 
 encoding = 'utf-8'
-DEBUG = True
+DEBUG = False
 LOGIN = False
 
 mode = None
@@ -19,7 +19,10 @@ while mode not in ('r','l'):
 nickname = input("Insira seu apelido: ")
 DIR_NICK = f'info_{nickname}'
 
-user_email = input("Insira seu email: ")
+if mode == 'r':
+    user_email = input("Insira seu email: ")
+else:
+    user_email = "" 
 
 if mode == 'r':
     # Registrar: pedir senha (duas vezes) e criar arquivo de chaves
@@ -213,7 +216,7 @@ def receber():
 
                 elif cmd == 'become_owner':
                     grp = payload.get('group')
-                    print(f"[CLIENT] Você agora é dono do grupo {grp}. Rode /rotategroup {grp}.")
+                    print(f"[CLIENT] Você agora é dono do grupo {grp}.")
 
                 elif cmd == 'removed':
                     print(f"[CLIENT] {payload.get('msg')}")
